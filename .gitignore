@@ -1,0 +1,5 @@
+*.test
+coverage.out
+*.log
+.idea/
+.vscode/
