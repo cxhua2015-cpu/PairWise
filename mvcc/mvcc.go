@@ -1,6 +1,9 @@
 package mvcc
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var (
 	ErrNotImplemented  = errors.New("mvcc: not implemented")
@@ -102,17 +105,24 @@ type Snapshot struct {
 	KVs             []KV
 }
 
-type Store struct{}
+type Store struct {
+	mu         sync.Mutex
+	maxLive    int
+	liveBytes  int
+	revision   uint64
+	compactRev uint64
+	live       map[string]version
+	history    map[string][]version
+	events     []Event
+}
 
-func New(opts Options) (*Store, error)                                { return nil, ErrNotImplemented }
-func (s *Store) Put(key string, value []byte) (Event, error)          { return Event{}, ErrNotImplemented }
-func (s *Store) Delete(key string) (Event, bool, error)               { return Event{}, false, ErrNotImplemented }
-func (s *Store) Range(key, end string, revision uint64) ([]KV, error) { return nil, ErrNotImplemented }
-func (s *Store) Watch(prefix string, afterRevision uint64, limit int) ([]Event, error) {
-	return nil, ErrNotImplemented
+func New(opts Options) (*Store, error) {
+	if opts.MaxLiveBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Store{
+		maxLive: opts.MaxLiveBytes,
+		live:    make(map[string]version),
+		history: make(map[string][]version),
+	}, nil
 }
-func (s *Store) Txn(compares []Compare, success, failure []Op) (TxnResponse, error) {
-	return TxnResponse{}, ErrNotImplemented
-}
-func (s *Store) Compact(revision uint64) error { return ErrNotImplemented }
-func (s *Store) Snapshot() Snapshot            { return Snapshot{} }
