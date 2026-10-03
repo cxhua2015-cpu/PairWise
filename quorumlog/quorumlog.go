@@ -84,23 +84,3 @@ type Snapshot struct {
 	Streams       []StreamState
 	BufferedBytes int
 }
-
-type Tracker struct{}
-
-func New(opts Options) (*Tracker, error) { return nil, ErrNotImplemented }
-
-func (t *Tracker) Open(config StreamConfig, at int64) error { return ErrNotImplemented }
-
-func (t *Tracker) Apply(update Update) (Outcome, error) {
-	return Outcome{}, ErrNotImplemented
-}
-
-func (t *Tracker) ApplyBatch(updates []Update) ([]Outcome, error) {
-	return nil, ErrNotImplemented
-}
-
-func (t *Tracker) ExpireBefore(cutoff int64) ([]ExpiredStream, error) {
-	return nil, ErrNotImplemented
-}
-
-func (t *Tracker) Snapshot() Snapshot { return Snapshot{} }
