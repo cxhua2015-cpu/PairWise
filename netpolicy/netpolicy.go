@@ -76,10 +76,4 @@ type Snapshot struct {
 	UsedValueBytes int
 	Rules          []RuleView
 }
-type Table struct{}
-
-func New(Options) (*Table, error)                               { return nil, ErrNotImplemented }
-func (*Table) Apply(Change) (uint64, error)                     { return 0, ErrNotImplemented }
-func (*Table) ApplyBatch([]Change) (uint64, error)              { return 0, ErrNotImplemented }
-func (*Table) Match(string, Protocol, uint16) (Decision, error) { return Decision{}, ErrNotImplemented }
-func (*Table) Snapshot() Snapshot                               { return Snapshot{} }
+// Table is implemented in table.go.
