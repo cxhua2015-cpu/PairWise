@@ -54,10 +54,3 @@ type Snapshot struct {
 	Nodes          []Node
 	Tokens         []TokenView
 }
-type Ring struct{}
-
-func New(Options) (*Ring, error)                          { return nil, ErrNotImplemented }
-func (*Ring) Apply(Change) (uint64, error)                { return 0, ErrNotImplemented }
-func (*Ring) ApplyBatch([]Change) (uint64, error)         { return 0, ErrNotImplemented }
-func (*Ring) Lookup([]byte, int) ([]Owner, uint64, error) { return nil, 0, ErrNotImplemented }
-func (*Ring) Snapshot() Snapshot                          { return Snapshot{} }
