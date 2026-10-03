@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 var (
@@ -48,10 +49,9 @@ func (e *OpError) Error() string {
 }
 func (e *OpError) Unwrap() error { return e.Err }
 
-type Store struct{}
-
-func New(initial []byte, opts Options) (*Store, error) { return nil, ErrNotImplemented }
-func (s *Store) Apply(expectedRevision uint64, ops []Operation) (Result, error) {
-	return Result{}, ErrNotImplemented
+type Store struct {
+	mu       sync.RWMutex
+	doc      any
+	revision uint64
+	maxNodes int
 }
-func (s *Store) Snapshot() Snapshot { return Snapshot{} }
