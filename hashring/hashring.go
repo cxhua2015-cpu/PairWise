@@ -1,6 +1,9 @@
 package hashring
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("hashring: not implemented")
@@ -54,10 +57,14 @@ type Snapshot struct {
 	Nodes          []Node
 	Tokens         []TokenView
 }
-type Ring struct{}
-
-func New(Options) (*Ring, error)                          { return nil, ErrNotImplemented }
-func (*Ring) Apply(Change) (uint64, error)                { return 0, ErrNotImplemented }
-func (*Ring) ApplyBatch([]Change) (uint64, error)         { return 0, ErrNotImplemented }
-func (*Ring) Lookup([]byte, int) ([]Owner, uint64, error) { return nil, 0, ErrNotImplemented }
-func (*Ring) Snapshot() Snapshot                          { return Snapshot{} }
+type Ring struct {
+	mu             sync.RWMutex
+	hasher         Hasher
+	maxNodes       int
+	maxTokens      int
+	maxValueBytes  int
+	nodes          map[string]*nodeState
+	tokens         []token
+	generation     uint64
+	usedValueBytes int
+}
