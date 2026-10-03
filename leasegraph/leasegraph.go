@@ -85,14 +85,3 @@ type Snapshot struct {
 	Ready     []string
 	UsedBytes int
 }
-
-type Scheduler struct{}
-
-func New(Options) (*Scheduler, error)         { return nil, ErrNotImplemented }
-func (*Scheduler) AddBatch([]TaskSpec) error  { return ErrNotImplemented }
-func (*Scheduler) Claim(int64) (Lease, error) { return Lease{}, ErrNotImplemented }
-func (*Scheduler) Complete(int64, string, uint64, []byte, bool) (Transition, error) {
-	return Transition{}, ErrNotImplemented
-}
-func (*Scheduler) Sweep(int64) (SweepResult, error) { return SweepResult{}, ErrNotImplemented }
-func (*Scheduler) Snapshot() Snapshot               { return Snapshot{} }
