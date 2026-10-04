@@ -1,3 +1,21 @@
 # fairqueue
 
-See `SPEC.md`. Implement the `fairqueue` package without changing the public contract.
+并发安全的内存加权公平任务队列（Go 1.22+，仅标准库）。公开契约见 `SPEC.md`。
+
+## 设计
+
+- **索引**：一张全局 `map[ID]queue` 保证任务 ID 全局唯一并支持 O(1) 存在性判断；每个命名队列一张独立的 FIFO 切片存放任务。
+- **FIFO**：每个命名队列内部按 `Sequence` 严格先进先出；切片头部即最老任务，出队即弹头。
+- **加权轮转**：构造时将队列名升序排序，每个名字按权重连续重复生成不可变调度轮（如 `a=2,b=1` → `[a,a,b]`）。调度从游标开始逐槽扫描，每检查一个槽位游标推进一格（取模）；空队列跳过，整轮无选中即停止。`Peek` 只模拟不落地，`Dequeue` 移除选中任务并保存游标。
+- **事务**：`ApplyBatch` 先对全部变更做结构校验（不查状态），再在隔离候选状态上按输入顺序执行存在性语义（`ErrExists`/`ErrNotFound`）并分配连续 sequence，最后仅检查最终任务数与 Payload 字节容量。任何失败整体回滚，`NextSequence` 不消耗；成功非空批次 generation 恰好 +1。
+- **容量**：仅对最终候选状态检查 `MaxTasks` 与总 Payload 字节，因此"删旧加新"的替换批次可以在满容量队列上成功。
+- **所有权**：Put 时深拷贝 Payload；`Peek`/`Dequeue`/`Snapshot` 返回的任务、Payload 与 Wheel 均为独立副本，输入输出与内部状态互不影响。
+- **并发**：全部公开方法由一把互斥锁保护，可安全并发调用。
+
+## 复杂度
+
+- `ApplyBatch`：时间 O(B + T + P)，B 为批次数、T 为总任务数、P 为总 Payload 字节（候选克隆 + 深拷贝）；空间 O(T + P)。
+- `Peek`/`Dequeue`：时间 O(L·W + S·P̄)，L 为选中数、W 为轮长、S·P̄ 为返回 Payload 拷贝；空间 O(S·P̄)。
+- `Snapshot`：时间 O(Q log Q + T + P)（队列名排序 + 拷贝）；空间 O(T + P)。
+- 任意 ID 删除：O(该队列长度) 扫描 FIFO 切片。
+- 总体空间：O(T + P + W)。
