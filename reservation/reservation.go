@@ -53,13 +53,3 @@ type Snapshot struct {
 	UsedReservations, UsedValueBytes int
 	Resources                        []ResourceView
 }
-type Ledger struct{}
-
-func New(Options) (*Ledger, error)                  { return nil, ErrNotImplemented }
-func (*Ledger) Apply(Change) (uint64, error)        { return 0, ErrNotImplemented }
-func (*Ledger) ApplyBatch([]Change) (uint64, error) { return 0, ErrNotImplemented }
-func (*Ledger) At(string, int64) (AtResult, error)  { return AtResult{}, ErrNotImplemented }
-func (*Ledger) Scan(string, int64, int64, int) (ScanResult, error) {
-	return ScanResult{}, ErrNotImplemented
-}
-func (*Ledger) Snapshot() Snapshot { return Snapshot{} }
