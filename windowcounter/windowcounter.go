@@ -1,0 +1,5 @@
+package windowcounter
+import "errors"
+var(ErrInvalidOptions=errors.New("invalid options");ErrInvalidInput=errors.New("invalid input");ErrTime=errors.New("time moved backwards");ErrUnderflow=errors.New("counter underflow");ErrOverflow=errors.New("counter overflow");ErrCapacity=errors.New("capacity exceeded"))
+type Options struct{Window int64;MaxKeys,MaxEvents,MaxNameBytes int};type Delta struct{Key string;Amount int64};type Batch struct{Now int64;Deltas []Delta};type Count struct{Key string;Value int64};type Result struct{Generation uint64;ExpiredEvents int;Counts []Count};type KeyState struct{Key string;Value int64;Events int};type Snapshot struct{Generation uint64;Now int64;Events int;Keys []KeyState};type Registry struct{}
+func New(Options)(*Registry,error){return nil,ErrInvalidOptions};func(*Registry)Apply(Batch)(Result,error){return Result{},ErrInvalidInput};func(*Registry)Get(string,int64)(int64,bool,error){return 0,false,ErrInvalidInput};func(*Registry)Sweep(int64)(int,error){return 0,ErrInvalidInput};func(*Registry)Snapshot()Snapshot{return Snapshot{}}
