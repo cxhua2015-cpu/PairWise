@@ -1,6 +1,9 @@
 package dagstore
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var (
 	ErrInvalidOptions = errors.New("invalid options")
@@ -47,10 +50,13 @@ type Snapshot struct {
 	Nodes                    []Node
 	Edges                    []Edge
 }
-type Store struct{}
-
-func New(Options) (*Store, error)                     { return nil, ErrInvalidOptions }
-func (*Store) Apply(Batch) (Result, error)            { return Result{}, ErrInvalidInput }
-func (*Store) Reachable(string, string) (bool, error) { return false, ErrInvalidInput }
-func (*Store) Topological() []string                  { return nil }
-func (*Store) Snapshot() Snapshot                     { return Snapshot{} }
+type Store struct {
+	mu         sync.RWMutex
+	opts       Options
+	nodes      map[string]*nodeState
+	edges      map[edgeKey]uint64
+	out        map[string]map[string]struct{}
+	in         map[string]map[string]struct{}
+	generation uint64
+	revision   uint64
+}
