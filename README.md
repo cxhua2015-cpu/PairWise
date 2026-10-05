@@ -1,3 +1,33 @@
 # resourceledger087
 
-Read `SPEC.md` and implement the package.
+并发安全的内存型资源计量账本（Go 1.22+，仅标准库）。语义见 `SPEC.md`。
+
+## 设计说明
+
+### 索引
+
+主索引为 `map[string]Account`（按名称 O(1) 定位）。`Top` 与 `Snapshot` 不维护额外的有序索引，而是在读路径上对当前账户快照排序：`Top` 按数值降序、名称升序，`Snapshot` 按名称升序。读操作使用 `sync.RWMutex` 的读锁，互不阻塞；写操作（`Apply`）独占写锁。
+
+### 候选事务
+
+`Apply` 分两阶段：先对整个批次做完整结构校验（kind、名称字符集与长度、未使用字段必须为零、输入绝对值上限），期间不读取任何状态；随后在写锁内把当前账户表克隆为候选表，按输入顺序在候选表上执行 Add/Set/Delete，Add/Set 分配连续 revision。算术前先检测 int64 溢出并执行绝对值上限，账户容量上限仅在批次末对候选表检查。任一步失败直接返回，原表未被触碰，天然整体回滚；全部成功才一次性提交候选表，且非空批次 generation 只递增一次。
+
+### 所有权
+
+`Result.Changed`、`Top`、`Snapshot` 返回的切片均为新分配的副本，与内部状态完全隔离；调用方修改返回值不影响账本，账本后续变更也不影响已返回的切片。
+
+### 复杂度
+
+设批次含 `k` 个操作、账本含 `n` 个账户：
+
+- `Apply`：校验 O(k)，克隆候选表 O(n)，执行 O(k)，合计 O(n + k) 时间、O(n) 额外空间。
+- `Top`：O(n log n) 时间（排序）、O(n) 额外空间。
+- `Snapshot`：O(n log n) 时间（排序）、O(n) 额外空间。
+
+## 验证
+
+```sh
+go test ./...
+go test -race ./...
+go run ./cmd/demo
+```
