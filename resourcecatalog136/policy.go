@@ -1,12 +1,60 @@
 package resourcecatalog136
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var ErrDenied = errors.New("admission denied")
 
 // Policy owns the independently synchronized admission configuration.
-type Policy struct{}
+type Policy struct {
+	mu      sync.RWMutex
+	maxOps  int
+	allowed map[string]struct{}
+}
 
-func NewPolicy(int, []string) (*Policy, error) { return nil, ErrNotImplemented }
-func (*Policy) ReplaceActors([]string) error   { return ErrNotImplemented }
-func (*Policy) Authorize(string, int) error    { return ErrNotImplemented }
+func NewPolicy(maxOps int, actors []string) (*Policy, error) {
+	if maxOps <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	allowed, err := actorSet(actors)
+	if err != nil {
+		return nil, err
+	}
+	return &Policy{maxOps: maxOps, allowed: allowed}, nil
+}
+
+func actorSet(actors []string) (map[string]struct{}, error) {
+	set := make(map[string]struct{}, len(actors))
+	for _, a := range actors {
+		if a == "" {
+			return nil, ErrInvalidInput
+		}
+		set[a] = struct{}{}
+	}
+	return set, nil
+}
+
+func (p *Policy) ReplaceActors(actors []string) error {
+	set, err := actorSet(actors)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.allowed = set
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *Policy) Authorize(actor string, ops int) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if _, ok := p.allowed[actor]; !ok {
+		return ErrDenied
+	}
+	if ops > p.maxOps {
+		return ErrDenied
+	}
+	return nil
+}
