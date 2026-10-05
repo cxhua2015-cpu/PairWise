@@ -1,6 +1,11 @@
 package resourceledger117
 
-import "errors"
+import (
+	"errors"
+	"math"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -42,9 +47,150 @@ type Snapshot struct {
 	Generation, NextRevision uint64
 	Accounts                 []Account
 }
-type Ledger struct{}
 
-func New(Options) (*Ledger, error)          { return nil, ErrNotImplemented }
-func (*Ledger) Apply(Batch) (Result, error) { return Result{}, ErrNotImplemented }
-func (*Ledger) Top(int) ([]Account, error)  { return nil, ErrNotImplemented }
-func (*Ledger) Snapshot() Snapshot          { return Snapshot{} }
+type Ledger struct {
+	mu       sync.Mutex
+	opts     Options
+	accounts map[string]Account
+	gen      uint64
+	rev      uint64
+}
+
+func New(o Options) (*Ledger, error) {
+	if o.MaxAccounts <= 0 || o.MaxNameBytes <= 0 || o.MaxAbsValue <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Ledger{opts: o, accounts: make(map[string]Account)}, nil
+}
+
+func validName(name string, maxBytes int) bool {
+	if name == "" || len(name) > maxBytes {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *Ledger) Apply(b Batch) (Result, error) {
+	// 阶段一：完整结构校验，不读取任何状态。
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Add, Set, Delete:
+		default:
+			return Result{}, ErrInvalidInput
+		}
+		if !validName(op.Name, l.opts.MaxNameBytes) {
+			return Result{}, ErrInvalidInput
+		}
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(b.Ops) == 0 {
+		return Result{Generation: l.gen, Revision: l.rev}, nil
+	}
+
+	// 阶段二：候选事务——在克隆状态上按输入顺序执行。
+	cand := make(map[string]Account, len(l.accounts))
+	for k, v := range l.accounts {
+		cand[k] = v
+	}
+	rev := l.rev
+	var changed []Account
+	touched := make(map[string]int) // name -> index in changed
+
+	touch := func(a Account) {
+		if i, ok := touched[a.Name]; ok {
+			changed[i] = a
+		} else {
+			touched[a.Name] = len(changed)
+			changed = append(changed, a)
+		}
+	}
+
+	for _, op := range b.Ops {
+		cur, ok := cand[op.Name]
+		switch op.Kind {
+		case Add:
+			if op.Delta > 0 && cur.Value > math.MaxInt64-op.Delta ||
+				op.Delta < 0 && cur.Value < math.MinInt64-op.Delta {
+				return Result{}, ErrValue
+			}
+			v := cur.Value + op.Delta
+			if v > l.opts.MaxAbsValue || v < -l.opts.MaxAbsValue {
+				return Result{}, ErrValue
+			}
+			rev++
+			a := Account{Name: op.Name, Value: v, Revision: rev}
+			cand[op.Name] = a
+			touch(a)
+		case Set:
+			if op.Value > l.opts.MaxAbsValue || op.Value < -l.opts.MaxAbsValue {
+				return Result{}, ErrValue
+			}
+			rev++
+			a := Account{Name: op.Name, Value: op.Value, Revision: rev}
+			cand[op.Name] = a
+			touch(a)
+		case Delete:
+			if !ok {
+				return Result{}, ErrNotFound
+			}
+			delete(cand, op.Name)
+			touch(cur)
+		}
+	}
+
+	// 阶段三：仅在批次末检查最终账户容量。
+	if len(cand) > l.opts.MaxAccounts {
+		return Result{}, ErrCapacity
+	}
+
+	// 提交。
+	l.accounts = cand
+	l.rev = rev
+	l.gen++
+	return Result{Generation: l.gen, Revision: rev, Changed: changed}, nil
+}
+
+func (l *Ledger) Top(n int) ([]Account, error) {
+	if n < 0 {
+		return nil, ErrInvalidInput
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all := make([]Account, 0, len(l.accounts))
+	for _, a := range l.accounts {
+		all = append(all, a)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Value != all[j].Value {
+			return all[i].Value > all[j].Value
+		}
+		return all[i].Name < all[j].Name
+	})
+	if n > len(all) {
+		n = len(all)
+	}
+	return all[:n], nil
+}
+
+func (l *Ledger) Snapshot() Snapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := Snapshot{Generation: l.gen, NextRevision: l.rev + 1}
+	if len(l.accounts) > 0 {
+		s.Accounts = make([]Account, 0, len(l.accounts))
+		for _, a := range l.accounts {
+			s.Accounts = append(s.Accounts, a)
+		}
+		sort.Slice(s.Accounts, func(i, j int) bool { return s.Accounts[i].Name < s.Accounts[j].Name })
+	}
+	return s
+}
