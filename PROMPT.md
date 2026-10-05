@@ -3,3 +3,5 @@
 核心语义：队列使用显式非负单调时间，Apply 原子顺序执行 Enqueue/Cancel，Enqueue 分配 revision，最终容量只在末尾检查。Pop 选择 ReadyAt <= now 的任务，按 Priority 降序、ReadyAt 升序、ID 升序并原子删除。失败回滚时间、状态和 revision。 所有公开方法必须支持并发调用。
 
 请保留公开 API、错误值和规范顺序。不得修改 `SPEC.md`、`PROMPT.md`、`go.mod`、`taskqueue150/contract_test.go`、`cmd/demo/main.go`；不要增加第三方依赖、访问网络、删除或弱化测试、硬编码示例结果，也不要创建 Git 提交。请补充边界与并发测试，在 README 中说明索引、候选事务、所有权及复杂度。完成后执行 `go test ./...`、`go test -race ./...` 和 `go run ./cmd/demo`。
+
+本题是强制多文件联动任务。除原有状态引擎文件外，还必须完成 `policy.go` 与 `coordinator.go`：策略层维护可原子替换的 actor 白名单及单批操作数限制；协调层必须先执行授权，再调用状态引擎，并为成功、拒绝和引擎失败分配连续审计序号。策略拒绝不得读取或修改核心状态，返回的审计切片必须隔离所有权，三层均须并发安全。合同测试直接覆盖三个生产文件的联动，只修改单个实现文件无法通过。不得删除、合并或绕过这些生产文件。
