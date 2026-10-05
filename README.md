@@ -1,0 +1,3 @@
+# costledger
+
+Read `SPEC.md` and implement the package.
