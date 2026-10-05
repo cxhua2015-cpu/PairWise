@@ -1,0 +1,3 @@
+# metacatalog326
+
+Read `SPEC.md` and implement the package.
