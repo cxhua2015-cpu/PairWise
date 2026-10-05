@@ -1,6 +1,11 @@
 package migrationqueue
 
-import "errors"
+import (
+	"cmp"
+	"errors"
+	"slices"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -42,9 +47,155 @@ type Snapshot struct {
 	Now                      int64
 	Items                    []Item
 }
-type Queue struct{}
 
-func New(Options) (*Queue, error)             { return nil, ErrNotImplemented }
-func (*Queue) Apply(Batch) (Result, error)    { return Result{}, ErrNotImplemented }
-func (*Queue) Pop(int64, int) ([]Item, error) { return nil, ErrNotImplemented }
-func (*Queue) Snapshot() Snapshot             { return Snapshot{} }
+type Queue struct {
+	mu           sync.Mutex
+	items        map[string]Item
+	generation   uint64
+	nextRevision uint64
+	now          int64
+	maxItems     int
+	maxIDBytes   int
+}
+
+func New(o Options) (*Queue, error) {
+	if o.MaxItems <= 0 || o.MaxIDBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Queue{
+		items:        make(map[string]Item),
+		nextRevision: 1,
+		maxItems:     o.MaxItems,
+		maxIDBytes:   o.MaxIDBytes,
+	}, nil
+}
+
+func validID(id string, maxBytes int) bool {
+	if id == "" || len(id) > maxBytes {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (q *Queue) validateOp(op Op) error {
+	switch op.Kind {
+	case Enqueue:
+		if !validID(op.ID, q.maxIDBytes) || op.ReadyAt < 0 {
+			return ErrInvalidInput
+		}
+	case Cancel:
+		if !validID(op.ID, q.maxIDBytes) || op.Priority != 0 || op.ReadyAt != 0 {
+			return ErrInvalidInput
+		}
+	default:
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func (q *Queue) Apply(b Batch) (Result, error) {
+	if b.Now < 0 {
+		return Result{}, ErrInvalidInput
+	}
+	for _, op := range b.Ops {
+		if err := q.validateOp(op); err != nil {
+			return Result{}, err
+		}
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if b.Now < q.now {
+		return Result{}, ErrTime
+	}
+	if len(b.Ops) == 0 {
+		return Result{Generation: q.generation, Revision: q.nextRevision - 1}, nil
+	}
+	candidate := make(map[string]Item, len(q.items)+len(b.Ops))
+	for id, it := range q.items {
+		candidate[id] = it
+	}
+	revision := q.nextRevision
+	for _, op := range b.Ops {
+		if op.Kind == Enqueue {
+			if _, ok := candidate[op.ID]; ok {
+				return Result{}, ErrExists
+			}
+			candidate[op.ID] = Item{ID: op.ID, Priority: op.Priority, ReadyAt: op.ReadyAt, Revision: revision}
+			revision++
+		} else {
+			if _, ok := candidate[op.ID]; !ok {
+				return Result{}, ErrNotFound
+			}
+			delete(candidate, op.ID)
+		}
+	}
+	if len(candidate) > q.maxItems {
+		return Result{}, ErrCapacity
+	}
+	q.items = candidate
+	q.nextRevision = revision
+	q.now = b.Now
+	q.generation++
+	return Result{Generation: q.generation, Revision: revision - 1}, nil
+}
+
+func (q *Queue) Pop(now int64, limit int) ([]Item, error) {
+	if now < 0 || limit <= 0 {
+		return nil, ErrInvalidInput
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if now < q.now {
+		return nil, ErrTime
+	}
+	ready := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		if it.ReadyAt <= now {
+			ready = append(ready, it)
+		}
+	}
+	sortItems(ready)
+	if len(ready) > limit {
+		ready = ready[:limit]
+	}
+	for _, it := range ready {
+		delete(q.items, it.ID)
+	}
+	q.now = now
+	return ready, nil
+}
+
+func (q *Queue) Snapshot() Snapshot {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	items := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		items = append(items, it)
+	}
+	sortItems(items)
+	return Snapshot{
+		Generation:   q.generation,
+		NextRevision: q.nextRevision,
+		Now:          q.now,
+		Items:        items,
+	}
+}
+
+func sortItems(items []Item) {
+	slices.SortFunc(items, func(a, b Item) int {
+		if a.Priority != b.Priority {
+			return cmp.Compare(b.Priority, a.Priority)
+		}
+		if a.ReadyAt != b.ReadyAt {
+			return cmp.Compare(a.ReadyAt, b.ReadyAt)
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+}
