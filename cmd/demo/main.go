@@ -1,0 +1,13 @@
+package main
+
+import (
+	"example.com/pairwise/controlgraph188/controlgraph188"
+	"fmt"
+)
+
+func main() {
+	g, _ := controlgraph188.New(controlgraph188.Options{MaxNodes: 4, MaxEdges: 4, MaxNameBytes: 8})
+	x, _ := g.Apply(controlgraph188.Batch{Ops: []controlgraph188.Op{{Kind: controlgraph188.AddNode, From: "a"}, {Kind: controlgraph188.AddNode, From: "b"}, {Kind: controlgraph188.AddEdge, From: "a", To: "b"}}})
+	ok, _ := g.Reachable("a", "b")
+	fmt.Printf("generation=%d nodes=%d edges=%d reachable=%t\n", x.Generation, len(g.Snapshot().Nodes), len(g.Snapshot().Edges), ok)
+}
