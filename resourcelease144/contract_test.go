@@ -61,3 +61,48 @@ func TestConcurrent(t *testing.T) {
 		t.Fatal(len(x.Snapshot().Entries))
 	}
 }
+
+// Cross-file contract: core state, policy admission and coordinator audit must work together.
+func TestPolicyCoordinatorIntegration(t *testing.T) {
+	core, err := New(Options{MaxEntries: 8, MaxKeyBytes: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewPolicy(1, []string{"alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coord, err := NewCoordinator(core, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := Batch{Now: 1, Ops: []Op{{Kind: Put, Key: "coord-a", ExpiresAt: 10}}}
+	before := core.Snapshot()
+	if _, err = coord.Apply("bob", good); !errors.Is(err, ErrDenied) || !reflect.DeepEqual(before, core.Snapshot()) {
+		t.Fatal(err)
+	}
+	result, err := coord.Apply("alice", good)
+	if err != nil || result.Generation != 1 {
+		t.Fatal(err, result)
+	}
+	tooMany := good
+	tooMany.Ops = append(append([]Op(nil), good.Ops...), good.Ops...)
+	snapshot := core.Snapshot()
+	if _, err = coord.Apply("alice", tooMany); !errors.Is(err, ErrDenied) || !reflect.DeepEqual(snapshot, core.Snapshot()) {
+		t.Fatal(err)
+	}
+	decisions := coord.Decisions()
+	if len(decisions) != 3 || decisions[0].Sequence != 1 || decisions[0].Committed || !decisions[1].Committed || decisions[1].Generation != 1 || decisions[2].Sequence != 3 {
+		t.Fatal(decisions)
+	}
+	decisions[0].Actor = "mutated"
+	if coord.Decisions()[0].Actor != "bob" {
+		t.Fatal("decision slice aliases internal state")
+	}
+	if err = policy.ReplaceActors([]string{"carol"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = coord.Apply("alice", good); !errors.Is(err, ErrDenied) {
+		t.Fatal(err)
+	}
+}
