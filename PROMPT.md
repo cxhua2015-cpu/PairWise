@@ -3,3 +3,5 @@
 核心语义：原子批次按输入顺序执行 Put/Delete；Put 分配连续 revision，Delete 不分配。完整结构校验先于状态读取，最终记录数与 Value 总字节容量只在批次末检查。失败回滚全部状态、generation 和 revision。Get/Snapshot 深拷贝 Value，Snapshot 按名称排序。 所有公开方法必须支持并发调用。
 
 请保留公开 API、错误值和规范顺序。不得修改 `SPEC.md`、`PROMPT.md`、`go.mod`、`resourcecatalog146/contract_test.go`、`cmd/demo/main.go`；不要增加第三方依赖、访问网络、删除或弱化测试、硬编码示例结果，也不要创建 Git 提交。请补充边界与并发测试，在 README 中说明索引、候选事务、所有权及复杂度。完成后执行 `go test ./...`、`go test -race ./...` 和 `go run ./cmd/demo`。
+
+本题是强制多文件联动任务。除原有状态引擎文件外，还必须完成 `policy.go` 与 `coordinator.go`：策略层维护可原子替换的 actor 白名单及单批操作数限制；协调层必须先执行授权，再调用状态引擎，并为成功、拒绝和引擎失败分配连续审计序号。策略拒绝不得读取或修改核心状态，返回的审计切片必须隔离所有权，三层均须并发安全。合同测试直接覆盖三个生产文件的联动，只修改单个实现文件无法通过。不得删除、合并或绕过这些生产文件。
