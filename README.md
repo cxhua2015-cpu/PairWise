@@ -1,3 +1,40 @@
 # migrationqueue
 
-Read `SPEC.md` and implement the package.
+并发安全的内存型迁移优先队列（Go 1.22+，仅标准库）。语义详见 `SPEC.md`。
+
+## 索引
+
+- 主索引为 `map[string]Item`，按 ID 提供 O(1) 的存在性判断、入队与取消。
+- 不维护持久堆；`Pop`/`Snapshot` 时按需对候选集排序，规范顺序为
+  Priority 降序、ReadyAt 升序、ID 升序。
+- 另有两个单调计数器：`generation`（非空成功批次 +1）与
+  `nextRevision`（每次成功 Enqueue 分配并递增，从 1 开始）。
+
+## 候选事务
+
+`Apply` 以候选事务方式执行：
+
+1. 先对整个批次做完整结构校验（时间非负、kind 合法、ID 字符集与字节上限），
+   不读取任何状态。
+2. 加锁后检查时间单调性（`ErrTime`），然后把当前 map 克隆为候选状态。
+3. 在候选状态上按序执行 Enqueue/Cancel，revision 在局部计数器上分配。
+4. 仅在末尾做最终容量检查（`ErrCapacity`），中途允许瞬时超容。
+5. 全部成功才一次性提交（替换 map、推进时间与计数器）；任一步失败直接
+   丢弃候选，时间、条目与 revision 完全回滚。
+
+## 所有权
+
+- 所有公开方法持有同一把互斥锁，可并发调用。
+- `Snapshot` 与 `Pop` 返回的切片及其中的 `Item` 都是按值拷贝，
+  调用方修改返回结果不会影响队列内部状态。
+- `Pop` 在锁内完成选择、截断与删除，同一条目不可能被弹出两次。
+
+## 复杂度
+
+设 n 为队列中条目数，b 为批次内 op 数，k 为弹出上限：
+
+- `Apply`：结构校验 O(b·L)（L 为 ID 长度），候选克隆 O(n)，
+  执行 O(b)，合计 O(n + b·L)。
+- `Pop`：筛选 O(n)，排序 O(n log n)，删除 O(min(n, k))。
+- `Snapshot`：O(n log n)（拷贝并排序）。
+- 空间：O(n)。
