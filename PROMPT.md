@@ -4,5 +4,5 @@
 
 请保留公开 API、错误值和规范顺序。不得修改 `SPEC.md`、`PROMPT.md`、`go.mod`、`balanceledger437/contract_test.go`、`cmd/demo/main.go`；不要增加第三方依赖、访问网络、删除或弱化测试、硬编码示例结果，也不要创建 Git 提交。请补充边界与并发测试，在 README 中说明索引、候选事务、所有权及复杂度。完成后执行 `go test ./...`、`go test -race ./...` 和 `go run ./cmd/demo`。
 
-本题为多文件联动任务：除原核心实现外，必须分别完成 `validation.go`、`stats.go`、`clone.go`，并保证预检、事务、统计和克隆共享一致语义。不得把全部逻辑合并回单个文件，也不得修改新增的 `integration_test.go`。
+本题为多文件联动任务：除原核心实现外，必须分别完成 `validation.go`、`stats.go`、`clone.go` 和 `preview.go`。`Preview` 需要在一致快照上复用完整事务语义，返回候选 Result、Snapshot、Stats，同时保证原对象、逻辑时钟和所有权不变；错误及优先级必须与同一状态上的 `Apply` 一致。不得把全部逻辑合并回单个文件，也不得修改新增的 `integration_test.go`。
 
