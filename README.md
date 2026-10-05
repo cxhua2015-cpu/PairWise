@@ -1,3 +1,21 @@
 # resourceledger157
 
-Read `SPEC.md` and implement the package.
+并发安全的内存型资源计量账本（Go 1.22+，仅标准库）。原子批次按输入顺序执行
+Add/Set/Delete，Add/Set 分配连续 revision；算术前检测 int64 溢出并执行绝对值
+上限，账户容量仅在批次末检查，失败整体回滚。`Top` 按数值降序、名称升序，
+`Snapshot` 按名称排序。
+
+## 设计说明
+
+- **索引**：主索引为 `map[string]Account`，按名称 O(1) 定位。`Top`/`Snapshot`
+  在读取时把 map 拷贝为切片并排序（分别为值降序+名称升序、名称升序），不维护
+  额外的有序结构，写入路径因此保持 O(1) 摊销。
+- **候选事务**：`Apply` 先在完整结构校验（kind、名称字符集与长度）通过后，把
+  当前 map 克隆为候选状态，在候选上按序执行全部操作并做溢出/绝对值检查，最后
+  统一做容量检查；任一失败直接丢弃候选，已提交状态零改动，实现整体回滚。成功
+  时整体替换 map，generation 恰好加一，revision 连续推进。
+- **所有权**：所有公开方法共用一把 `sync.Mutex`，可任意并发调用。`Result.Changed`、
+  `Top`、`Snapshot` 返回的切片与 `Account` 值均为新分配的副本，调用方修改不会
+  影响账本内部状态。
+- **复杂度**：`Apply` 为 O(a + k)，其中 a 为当前账户数（克隆）、k 为批内操作数；
+  `Top`/`Snapshot` 为 O(a log a)；空间 O(a)。
