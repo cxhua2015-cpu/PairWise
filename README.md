@@ -1,3 +1,24 @@
 # controlgraph108
 
-Read `SPEC.md` and implement the package.
+并发安全的内存型有向无环依赖图，语义见 `SPEC.md`。仅依赖标准库，Go 1.22+。
+
+## 设计说明
+
+**索引**：`Graph` 内部维护节点集合 `nodes`、边集合 `edges`，以及出邻接表 `out` 与入邻接表 `in` 四份冗余索引。`out` 支撑可达性 DFS 与环检测，`in` 使 `DeleteNode` 能 O(关联边数) 级联删除入边，无需全图扫描。
+
+**候选事务**：`Apply` 先对整个批次做纯结构校验（kind、名称字符集与字节上限、多余字段），不读取任何状态；通过后把四份索引浅拷贝为候选副本，在副本上顺序执行各操作（存在性、环检测、级联删除），批次末才检查节点/边容量。任一步失败直接丢弃候选，原图保持不变，实现整体回滚；全部成功则原子换入候选并使 generation 恰好加一（空批次不变）。
+
+**所有权与并发**：所有公开方法经由一把 `sync.RWMutex` 保护（`Apply` 写锁，`Reachable`/`Snapshot` 读锁）。`Snapshot` 返回的节点与边切片均为新分配并稳定排序（节点字典序；边按 From 再 To），调用方修改返回值不影响内部状态；候选副本在换入前为私有，换入后旧索引不再被写。
+
+**复杂度**（V 节点数、E 边数、B 批次操作数）：
+- `Apply`：结构校验 O(B·名称长度)，候选拷贝 O(V+E)，每操作均摊 O(1)，`AddEdge` 环检测 O(V+E)，容量检查 O(1)。
+- `Reachable`：O(V+E) DFS，基于持锁期间的一致快照。
+- `Snapshot`：O(V+E) 构造，O(V log V + E log E) 排序。
+
+## 验证
+
+```
+go test ./...
+go test -race ./...
+go run ./cmd/demo
+```
