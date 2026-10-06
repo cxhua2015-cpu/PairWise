@@ -1,6 +1,10 @@
 package topologygraph258
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -34,9 +38,161 @@ type Snapshot struct {
 	Nodes      []string
 	Edges      []Edge
 }
-type Graph struct{}
 
-func New(Options) (*Graph, error)                     { return nil, ErrNotImplemented }
-func (*Graph) Apply(Batch) (Result, error)            { return Result{}, ErrNotImplemented }
-func (*Graph) Reachable(string, string) (bool, error) { return false, ErrNotImplemented }
-func (*Graph) Snapshot() Snapshot                     { return Snapshot{} }
+// Graph is a concurrency-safe in-memory directed acyclic topology graph.
+type Graph struct {
+	mu         sync.RWMutex
+	opts       Options
+	nodes      map[string]struct{}
+	edges      map[Edge]struct{}
+	generation uint64
+}
+
+func New(opts Options) (*Graph, error) {
+	if opts.MaxNodes <= 0 || opts.MaxEdges <= 0 || opts.MaxNameBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Graph{
+		opts:  opts,
+		nodes: make(map[string]struct{}),
+		edges: make(map[Edge]struct{}),
+	}, nil
+}
+
+// Apply validates the batch structurally, then applies it atomically.
+// On any failure the graph is left untouched.
+func (g *Graph) Apply(b Batch) (Result, error) {
+	if err := g.ValidateBatch(b); err != nil {
+		return Result{}, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(b.Ops) == 0 {
+		return Result{Generation: g.generation}, nil
+	}
+	// Candidate transaction: work on private copies so a failure
+	// anywhere in the batch rolls back by simply discarding them.
+	nodes := make(map[string]struct{}, len(g.nodes))
+	for n := range g.nodes {
+		nodes[n] = struct{}{}
+	}
+	edges := make(map[Edge]struct{}, len(g.edges))
+	for e := range g.edges {
+		edges[e] = struct{}{}
+	}
+	for _, op := range b.Ops {
+		if err := applyOp(nodes, edges, op); err != nil {
+			return Result{}, err
+		}
+	}
+	if len(nodes) > g.opts.MaxNodes || len(edges) > g.opts.MaxEdges {
+		return Result{}, ErrCapacity
+	}
+	g.nodes = nodes
+	g.edges = edges
+	g.generation++
+	return Result{Generation: g.generation}, nil
+}
+
+func applyOp(nodes map[string]struct{}, edges map[Edge]struct{}, op Op) error {
+	switch op.Kind {
+	case AddNode:
+		if _, ok := nodes[op.From]; ok {
+			return ErrExists
+		}
+		nodes[op.From] = struct{}{}
+	case DeleteNode:
+		if _, ok := nodes[op.From]; !ok {
+			return ErrNotFound
+		}
+		delete(nodes, op.From)
+		for e := range edges {
+			if e.From == op.From || e.To == op.From {
+				delete(edges, e)
+			}
+		}
+	case AddEdge:
+		e := Edge{From: op.From, To: op.To}
+		if _, ok := nodes[op.From]; !ok {
+			return ErrNotFound
+		}
+		if _, ok := nodes[op.To]; !ok {
+			return ErrNotFound
+		}
+		if _, ok := edges[e]; ok {
+			return ErrExists
+		}
+		if reachable(nodes, edges, op.To, op.From) {
+			return ErrCycle
+		}
+		edges[e] = struct{}{}
+	case DeleteEdge:
+		e := Edge{From: op.From, To: op.To}
+		if _, ok := edges[e]; !ok {
+			return ErrNotFound
+		}
+		delete(edges, e)
+	}
+	return nil
+}
+
+// reachable reports whether dst is reachable from src over edges.
+// src == dst counts as reachable (zero-length path).
+func reachable(nodes map[string]struct{}, edges map[Edge]struct{}, src, dst string) bool {
+	if src == dst {
+		return true
+	}
+	seen := map[string]struct{}{src: {}}
+	stack := []string{src}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for e := range edges {
+			if e.From != cur {
+				continue
+			}
+			if e.To == dst {
+				return true
+			}
+			if _, ok := seen[e.To]; !ok {
+				seen[e.To] = struct{}{}
+				stack = append(stack, e.To)
+			}
+		}
+	}
+	return false
+}
+
+func (g *Graph) Reachable(from, to string) (bool, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if _, ok := g.nodes[from]; !ok {
+		return false, ErrNotFound
+	}
+	if _, ok := g.nodes[to]; !ok {
+		return false, ErrNotFound
+	}
+	return reachable(g.nodes, g.edges, from, to), nil
+}
+
+// Snapshot returns a stably sorted, fully detached view of the graph.
+func (g *Graph) Snapshot() Snapshot {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	nodes := make([]string, 0, len(g.nodes))
+	for n := range g.nodes {
+		nodes = append(nodes, n)
+	}
+	sort.Strings(nodes)
+	edges := make([]Edge, 0, len(g.edges))
+	for e := range g.edges {
+		edges = append(edges, e)
+	}
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].From != edges[j].From {
+			return edges[i].From < edges[j].From
+		}
+		return edges[i].To < edges[j].To
+	})
+	return Snapshot{Generation: g.generation, Nodes: nodes, Edges: edges}
+}
