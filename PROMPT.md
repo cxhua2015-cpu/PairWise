@@ -3,3 +3,6 @@
 核心语义：表使用显式非负单调时间。Apply 先结构校验再检查时间，在候选状态先删除 ExpiresAt <= Now 的条目，再顺序执行 Put/Touch/Delete；Put/Touch 分配 revision。最终容量失败或任何错误须连同淘汰、时间和 revision 一起回滚。Expire 使用相同闭区间边界。 所有公开方法必须支持并发调用。
 
 请保留公开 API、错误值和规范顺序。不得修改 `SPEC.md`、`PROMPT.md`、`go.mod`、`expirytable239/contract_test.go`、`cmd/demo/main.go`；不要增加第三方依赖、访问网络、删除或弱化测试、硬编码示例结果，也不要创建 Git 提交。请补充边界与并发测试，在 README 中说明索引、候选事务、所有权及复杂度。完成后执行 `go test ./...`、`go test -race ./...` 和 `go run ./cmd/demo`。
+
+本题为多文件联动任务：除原核心实现外，必须分别完成 `validation.go`、`stats.go`、`clone.go`，并保证预检、事务、统计和克隆共享一致语义。不得把全部逻辑合并回单个文件，也不得修改新增的 `integration_test.go`。
+
