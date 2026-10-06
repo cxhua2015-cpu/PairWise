@@ -6,5 +6,16 @@ type Stats struct {
 	Entries                  int
 }
 
-// Stats returns a linearizable summary of the current state.
-func (t *Table) Stats() Stats { return Stats{} }
+// Stats returns a linearizable summary of the current state: it is
+// computed under the same lock that serializes Apply and Expire, so it
+// never observes a partially committed transaction.
+func (t *Table) Stats() Stats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return Stats{
+		Generation:   t.generation,
+		NextRevision: t.nextRevision,
+		Now:          t.now,
+		Entries:      len(t.entries),
+	}
+}
