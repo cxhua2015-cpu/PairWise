@@ -6,5 +6,16 @@ type Stats struct {
 	Entries                  int
 }
 
-// Stats returns a linearizable summary of the current state.
-func (t *Table) Stats() Stats { return Stats{} }
+// Stats returns a linearizable summary of the current state: it is taken
+// under the read lock, so it reflects a single point in the happens-before
+// order of concurrent transactions.
+func (t *Table) Stats() Stats {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return Stats{
+		Generation:   t.generation,
+		NextRevision: t.nextRevision,
+		Now:          t.now,
+		Entries:      len(t.items),
+	}
+}
