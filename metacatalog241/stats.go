@@ -5,5 +5,20 @@ type Stats struct {
 	Records, TotalValueBytes int
 }
 
-// Stats returns a linearizable summary of the current state.
-func (s *Store) Stats() Stats { return Stats{} }
+// Stats returns a linearizable summary of the current state: it is computed
+// under the store lock, so it always reflects a single point in the
+// transaction history.
+func (s *Store) Stats() Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	total := 0
+	for _, rec := range s.records {
+		total += len(rec.Value)
+	}
+	return Stats{
+		Generation:      s.generation,
+		NextRevision:    s.nextRevision,
+		Records:         len(s.records),
+		TotalValueBytes: total,
+	}
+}

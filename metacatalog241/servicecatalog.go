@@ -1,6 +1,10 @@
 package metacatalog241
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -18,6 +22,7 @@ const (
 )
 
 type Options struct{ MaxRecords, MaxNameBytes, MaxValueBytes, MaxTotalValueBytes int }
+
 type Op struct {
 	Kind  Kind
 	Name  string
@@ -37,9 +42,134 @@ type Snapshot struct {
 	Generation, NextRevision uint64
 	Records                  []Record
 }
-type Store struct{}
 
-func New(Options) (*Store, error)               { return nil, ErrNotImplemented }
-func (*Store) Apply(Batch) (Result, error)      { return Result{}, ErrNotImplemented }
-func (*Store) Get(string) (Record, bool, error) { return Record{}, false, ErrNotImplemented }
-func (*Store) Snapshot() Snapshot               { return Snapshot{} }
+type Store struct {
+	mu           sync.RWMutex
+	opts         Options
+	records      map[string]Record
+	generation   uint64
+	nextRevision uint64
+}
+
+func New(opts Options) (*Store, error) {
+	if opts.MaxRecords <= 0 || opts.MaxNameBytes <= 0 || opts.MaxValueBytes <= 0 || opts.MaxTotalValueBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Store{opts: opts, records: make(map[string]Record), nextRevision: 1}, nil
+}
+
+// Apply validates the whole batch structurally, then executes ops in input
+// order against a candidate state. Capacity limits are checked at the end; any
+// failure discards the candidate, leaving state, generation and revision
+// untouched.
+func (s *Store) Apply(b Batch) (Result, error) {
+	if err := s.ValidateBatch(b); err != nil {
+		return Result{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	candidate := make(map[string]Record, len(s.records))
+	for name, rec := range s.records {
+		candidate[name] = rec
+	}
+	changed := make(map[string]Record, len(b.Ops))
+	nextRevision := s.nextRevision
+
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Put:
+			rec := Record{Name: op.Name, Value: cloneValue(op.Value), Revision: nextRevision}
+			nextRevision++
+			candidate[op.Name] = rec
+			changed[op.Name] = rec
+		case Delete:
+			rec, ok := candidate[op.Name]
+			if !ok {
+				return Result{}, ErrNotFound
+			}
+			delete(candidate, op.Name)
+			changed[op.Name] = Record{Name: op.Name, Revision: rec.Revision}
+		}
+	}
+
+	total := 0
+	for _, rec := range candidate {
+		total += len(rec.Value)
+	}
+	if len(candidate) > s.opts.MaxRecords || total > s.opts.MaxTotalValueBytes {
+		return Result{}, ErrCapacity
+	}
+
+	s.records = candidate
+	s.nextRevision = nextRevision
+	if len(b.Ops) > 0 {
+		s.generation++
+	}
+
+	names := make([]string, 0, len(changed))
+	for name := range changed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := Result{
+		Generation: s.generation,
+		Revision:   s.nextRevision - 1,
+		Changed:    make([]Record, 0, len(names)),
+	}
+	for _, name := range names {
+		result.Changed = append(result.Changed, cloneRecord(changed[name]))
+	}
+	return result, nil
+}
+
+func (s *Store) Get(name string) (Record, bool, error) {
+	if err := validateName(name, s.opts.MaxNameBytes); err != nil {
+		return Record{}, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.records[name]
+	if !ok {
+		return Record{}, false, nil
+	}
+	return cloneRecord(rec), true, nil
+}
+
+func (s *Store) Snapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
+
+func (s *Store) snapshotLocked() Snapshot {
+	names := make([]string, 0, len(s.records))
+	for name := range s.records {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	snap := Snapshot{
+		Generation:   s.generation,
+		NextRevision: s.nextRevision,
+		Records:      make([]Record, 0, len(names)),
+	}
+	for _, name := range names {
+		snap.Records = append(snap.Records, cloneRecord(s.records[name]))
+	}
+	return snap
+}
+
+func cloneRecord(rec Record) Record {
+	rec.Value = cloneValue(rec.Value)
+	return rec
+}
+
+func cloneValue(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	copied := make([]byte, len(value))
+	copy(copied, value)
+	return copied
+}
