@@ -6,4 +6,13 @@ type Stats struct {
 }
 
 // Stats returns a linearizable summary of the current state.
-func (s *Store) Stats() Stats { return Stats{} }
+func (s *Store) Stats() Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return Stats{
+		Generation:      s.generation,
+		NextRevision:    s.nextRevision,
+		Records:         len(s.records),
+		TotalValueBytes: s.totalBytes,
+	}
+}
