@@ -7,4 +7,13 @@ type Stats struct {
 }
 
 // Stats returns a linearizable summary of the current state.
-func (q *Queue) Stats() Stats { return Stats{} }
+func (q *Queue) Stats() Stats {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return Stats{
+		Generation:   q.gen,
+		NextRevision: q.nextRev,
+		Now:          q.now,
+		Items:        len(q.items),
+	}
+}
