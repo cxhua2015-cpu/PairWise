@@ -1,6 +1,10 @@
 package topologygraph218
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -34,9 +38,198 @@ type Snapshot struct {
 	Nodes      []string
 	Edges      []Edge
 }
-type Graph struct{}
 
-func New(Options) (*Graph, error)                     { return nil, ErrNotImplemented }
-func (*Graph) Apply(Batch) (Result, error)            { return Result{}, ErrNotImplemented }
-func (*Graph) Reachable(string, string) (bool, error) { return false, ErrNotImplemented }
-func (*Graph) Snapshot() Snapshot                     { return Snapshot{} }
+type Graph struct {
+	mu         sync.RWMutex
+	maxNodes   int
+	maxEdges   int
+	maxNameLen int
+	nodes      map[string]struct{}
+	edges      map[Edge]struct{}
+	adj        map[string]map[string]struct{}
+	generation uint64
+}
+
+func New(o Options) (*Graph, error) {
+	if o.MaxNodes <= 0 || o.MaxEdges <= 0 || o.MaxNameBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Graph{
+		maxNodes:   o.MaxNodes,
+		maxEdges:   o.MaxEdges,
+		maxNameLen: o.MaxNameBytes,
+		nodes:      make(map[string]struct{}),
+		edges:      make(map[Edge]struct{}),
+		adj:        make(map[string]map[string]struct{}),
+	}, nil
+}
+
+func validName(s string, max int) bool {
+	if s == "" || len(s) > max {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *Graph) validate(op Op) error {
+	switch op.Kind {
+	case AddNode, DeleteNode:
+		if op.To != "" || !validName(op.From, g.maxNameLen) {
+			return ErrInvalidInput
+		}
+	case AddEdge, DeleteEdge:
+		if !validName(op.From, g.maxNameLen) || !validName(op.To, g.maxNameLen) {
+			return ErrInvalidInput
+		}
+	default:
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func (g *Graph) Apply(b Batch) (Result, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, op := range b.Ops {
+		if err := g.validate(op); err != nil {
+			return Result{}, err
+		}
+	}
+	if len(b.Ops) == 0 {
+		return Result{Generation: g.generation}, nil
+	}
+	nodes := make(map[string]struct{}, len(g.nodes))
+	for n := range g.nodes {
+		nodes[n] = struct{}{}
+	}
+	edges := make(map[Edge]struct{}, len(g.edges))
+	for e := range g.edges {
+		edges[e] = struct{}{}
+	}
+	adj := make(map[string]map[string]struct{}, len(g.adj))
+	for from, set := range g.adj {
+		s := make(map[string]struct{}, len(set))
+		for to := range set {
+			s[to] = struct{}{}
+		}
+		adj[from] = s
+	}
+	for _, op := range b.Ops {
+		var err error
+		switch op.Kind {
+		case AddNode:
+			if _, ok := nodes[op.From]; ok {
+				err = ErrExists
+			} else {
+				nodes[op.From] = struct{}{}
+			}
+		case DeleteNode:
+			if _, ok := nodes[op.From]; !ok {
+				err = ErrNotFound
+			} else {
+				delete(nodes, op.From)
+				for e := range edges {
+					if e.From == op.From || e.To == op.From {
+						delete(edges, e)
+						delete(adj[e.From], e.To)
+					}
+				}
+			}
+		case AddEdge:
+			if _, ok := nodes[op.From]; !ok {
+				err = ErrNotFound
+			} else if _, ok := nodes[op.To]; !ok {
+				err = ErrNotFound
+			} else if _, ok := edges[Edge{op.From, op.To}]; ok {
+				err = ErrExists
+			} else if reaches(adj, op.To, op.From) {
+				err = ErrCycle
+			} else {
+				edges[Edge{op.From, op.To}] = struct{}{}
+				if adj[op.From] == nil {
+					adj[op.From] = make(map[string]struct{})
+				}
+				adj[op.From][op.To] = struct{}{}
+			}
+		case DeleteEdge:
+			if _, ok := edges[Edge{op.From, op.To}]; !ok {
+				err = ErrNotFound
+			} else {
+				delete(edges, Edge{op.From, op.To})
+				delete(adj[op.From], op.To)
+			}
+		}
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	if len(nodes) > g.maxNodes || len(edges) > g.maxEdges {
+		return Result{}, ErrCapacity
+	}
+	g.nodes, g.edges, g.adj = nodes, edges, adj
+	g.generation++
+	return Result{Generation: g.generation}, nil
+}
+
+func reaches(adj map[string]map[string]struct{}, from, to string) bool {
+	if from == to {
+		return true
+	}
+	seen := map[string]struct{}{from: {}}
+	stack := []string{from}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for m := range adj[n] {
+			if m == to {
+				return true
+			}
+			if _, ok := seen[m]; !ok {
+				seen[m] = struct{}{}
+				stack = append(stack, m)
+			}
+		}
+	}
+	return false
+}
+
+func (g *Graph) Reachable(from, to string) (bool, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if !validName(from, g.maxNameLen) || !validName(to, g.maxNameLen) {
+		return false, ErrInvalidInput
+	}
+	if _, ok := g.nodes[from]; !ok {
+		return false, ErrNotFound
+	}
+	if _, ok := g.nodes[to]; !ok {
+		return false, ErrNotFound
+	}
+	return reaches(g.adj, from, to), nil
+}
+
+func (g *Graph) Snapshot() Snapshot {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	s := Snapshot{Generation: g.generation, Nodes: make([]string, 0, len(g.nodes)), Edges: make([]Edge, 0, len(g.edges))}
+	for n := range g.nodes {
+		s.Nodes = append(s.Nodes, n)
+	}
+	for e := range g.edges {
+		s.Edges = append(s.Edges, e)
+	}
+	sort.Strings(s.Nodes)
+	sort.Slice(s.Edges, func(i, j int) bool {
+		if s.Edges[i].From != s.Edges[j].From {
+			return s.Edges[i].From < s.Edges[j].From
+		}
+		return s.Edges[i].To < s.Edges[j].To
+	})
+	return s
+}
