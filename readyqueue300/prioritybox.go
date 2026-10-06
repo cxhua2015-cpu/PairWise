@@ -1,6 +1,10 @@
 package readyqueue300
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -42,9 +46,121 @@ type Snapshot struct {
 	Now                      int64
 	Items                    []Item
 }
-type Queue struct{}
 
-func New(Options) (*Queue, error)             { return nil, ErrNotImplemented }
-func (*Queue) Apply(Batch) (Result, error)    { return Result{}, ErrNotImplemented }
-func (*Queue) Pop(int64, int) ([]Item, error) { return nil, ErrNotImplemented }
-func (*Queue) Snapshot() Snapshot             { return Snapshot{} }
+// Queue is a concurrency-safe in-memory ready-priority queue.
+type Queue struct {
+	mu           sync.RWMutex
+	opts         Options
+	items        map[string]Item
+	generation   uint64
+	nextRevision uint64
+	now          int64
+}
+
+func New(o Options) (*Queue, error) {
+	if o.MaxItems <= 0 || o.MaxIDBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Queue{opts: o, items: make(map[string]Item), nextRevision: 1}, nil
+}
+
+// Apply atomically executes the batch's ops in order against a candidate
+// state; any failure discards the candidate, rolling back time, items and
+// revision. Capacity is only checked at the end.
+func (q *Queue) Apply(b Batch) (Result, error) {
+	if err := validateBatch(b, q.opts.MaxIDBytes); err != nil {
+		return Result{}, err
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if b.Now < q.now {
+		return Result{}, ErrTime
+	}
+	if len(b.Ops) == 0 {
+		return Result{Generation: q.generation}, nil
+	}
+	candidate := make(map[string]Item, len(q.items)+len(b.Ops))
+	for id, it := range q.items {
+		candidate[id] = it
+	}
+	nextRevision := q.nextRevision
+	var lastRevision uint64
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Enqueue:
+			if _, ok := candidate[op.ID]; ok {
+				return Result{}, ErrExists
+			}
+			candidate[op.ID] = Item{ID: op.ID, Priority: op.Priority, ReadyAt: op.ReadyAt, Revision: nextRevision}
+			lastRevision = nextRevision
+			nextRevision++
+		case Cancel:
+			if _, ok := candidate[op.ID]; !ok {
+				return Result{}, ErrNotFound
+			}
+			delete(candidate, op.ID)
+		}
+	}
+	if len(candidate) > q.opts.MaxItems {
+		return Result{}, ErrCapacity
+	}
+	q.items = candidate
+	q.nextRevision = nextRevision
+	q.now = b.Now
+	q.generation++
+	return Result{Generation: q.generation, Revision: lastRevision}, nil
+}
+
+// Pop removes and returns up to limit ready items (ReadyAt <= now), ordered
+// by Priority desc, ReadyAt asc, ID asc.
+func (q *Queue) Pop(now int64, limit int) ([]Item, error) {
+	if now < 0 || limit <= 0 {
+		return nil, ErrInvalidInput
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if now < q.now {
+		return nil, ErrTime
+	}
+	ready := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		if it.ReadyAt <= now {
+			ready = append(ready, it)
+		}
+	}
+	sortItems(ready)
+	if len(ready) > limit {
+		ready = ready[:limit]
+	}
+	for _, it := range ready {
+		delete(q.items, it.ID)
+	}
+	q.now = now
+	return ready, nil
+}
+
+// Snapshot returns a consistent, fully detached view of the queue.
+func (q *Queue) Snapshot() Snapshot {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	items := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		items = append(items, it)
+	}
+	sortItems(items)
+	return Snapshot{Generation: q.generation, NextRevision: q.nextRevision, Now: q.now, Items: items}
+}
+
+// sortItems orders by Priority desc, ReadyAt asc, ID asc.
+func sortItems(items []Item) {
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.Priority != b.Priority {
+			return a.Priority > b.Priority
+		}
+		if a.ReadyAt != b.ReadyAt {
+			return a.ReadyAt < b.ReadyAt
+		}
+		return a.ID < b.ID
+	})
+}
