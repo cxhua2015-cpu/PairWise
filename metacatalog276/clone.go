@@ -1,4 +1,17 @@
 package metacatalog276
 
 // Clone returns a fully independent deep copy, including logical clocks.
-func (s *Store) Clone() (*Store, error) { return nil, ErrNotImplemented }
+func (s *Store) Clone() (*Store, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	records := make(map[string]entry, len(s.records))
+	for k, v := range s.records {
+		records[k] = entry{value: cloneBytes(v.value), revision: v.revision}
+	}
+	return &Store{
+		opts:         s.opts,
+		records:      records,
+		generation:   s.generation,
+		nextRevision: s.nextRevision,
+	}, nil
+}
