@@ -6,4 +6,12 @@ type Stats struct {
 }
 
 // Stats returns a linearizable summary of the current state.
-func (l *Ledger) Stats() Stats { return Stats{} }
+func (l *Ledger) Stats() Stats {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return Stats{
+		Generation:   l.generation,
+		NextRevision: l.revision + 1,
+		Accounts:     len(l.accounts),
+	}
+}
