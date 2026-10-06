@@ -1,4 +1,22 @@
 package expirytable279
 
-// Clone returns a fully independent deep copy, including logical clocks.
-func (t *Table) Clone() (*Table, error) { return nil, ErrNotImplemented }
+// Clone returns a fully independent deep copy, including logical clocks
+// (now, generation, nextRevision) and limits. The clone shares no mutable
+// state with the original, so subsequent transactions on either table
+// cannot alias each other.
+func (t *Table) Clone() (*Table, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entries := make(map[string]Entry, len(t.entries))
+	for k, e := range t.entries {
+		entries[k] = e
+	}
+	return &Table{
+		maxEntries:   t.maxEntries,
+		maxKeyBytes:  t.maxKeyBytes,
+		now:          t.now,
+		generation:   t.generation,
+		nextRevision: t.nextRevision,
+		entries:      entries,
+	}, nil
+}
