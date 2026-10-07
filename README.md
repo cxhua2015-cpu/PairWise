@@ -1,3 +1,28 @@
 # balanceledger367
 
-Read `SPEC.md` and implement the package.
+并发安全的内存型余额账本（Go 1.22+，仅标准库）。原子批次按输入顺序执行
+Add/Set/Delete，Add/Set 分配连续 revision，失败整体回滚。
+
+## 设计说明
+
+- **索引**：账户状态存放在唯一的 `map[string]Account` 主索引中，按名称 O(1)
+  定位。`Top` 与 `Snapshot` 在读取时物化并排序副本，不维护冗余有序结构，
+  因此写入路径无需额外索引维护成本。
+- **候选事务**：`Apply` 先对整个批次做完整结构校验（kind、名称字符集与字节
+  上限），再在主索引的克隆（候选状态）上按序应用操作。溢出与绝对值上限在
+  算术前检测，最终账户容量仅在批次末检查。任何一步失败直接丢弃候选状态，
+  主索引保持不变，天然实现整体回滚；全部成功才一次性提交，generation 仅
+  增加一次（空批次不变）。
+- **所有权**：所有公开方法由一把 `sync.RWMutex` 保护（写用 `Lock`，读用
+  `RLock`）。`Top`/`Snapshot`/`Result.Changed` 返回的切片均为新建副本，
+  调用方修改返回值不会影响内部状态，内部状态也不会在返回后被改写。
+- **复杂度**：`Apply` 为 O(k + n)，k 为批内操作数、n 为账户数（克隆候选
+  状态）；`Top` 与 `Snapshot` 为 O(n log n)（排序）；`New` 为 O(1)。
+
+## 验证
+
+```sh
+go test ./...
+go test -race ./...
+go run ./cmd/demo
+```
