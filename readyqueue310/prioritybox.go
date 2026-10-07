@@ -1,6 +1,10 @@
 package readyqueue310
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -42,9 +46,173 @@ type Snapshot struct {
 	Now                      int64
 	Items                    []Item
 }
-type Queue struct{}
 
-func New(Options) (*Queue, error)             { return nil, ErrNotImplemented }
-func (*Queue) Apply(Batch) (Result, error)    { return Result{}, ErrNotImplemented }
-func (*Queue) Pop(int64, int) ([]Item, error) { return nil, ErrNotImplemented }
-func (*Queue) Snapshot() Snapshot             { return Snapshot{} }
+// Queue is a concurrency-safe in-memory ready-priority queue.
+type Queue struct {
+	mu           sync.Mutex
+	maxItems     int
+	maxIDBytes   int
+	now          int64
+	generation   uint64
+	nextRevision uint64
+	items        map[string]Item
+}
+
+func New(o Options) (*Queue, error) {
+	if o.MaxItems <= 0 || o.MaxIDBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Queue{
+		maxItems:     o.MaxItems,
+		maxIDBytes:   o.MaxIDBytes,
+		nextRevision: 1,
+		items:        make(map[string]Item),
+	}, nil
+}
+
+func (q *Queue) validID(id string) bool {
+	if len(id) == 0 || len(id) > q.maxIDBytes {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// less orders items canonically: Priority desc, ReadyAt asc, ID asc.
+func less(a, b Item) bool {
+	if a.Priority != b.Priority {
+		return a.Priority > b.Priority
+	}
+	if a.ReadyAt != b.ReadyAt {
+		return a.ReadyAt < b.ReadyAt
+	}
+	return a.ID < b.ID
+}
+
+type undoEntry struct {
+	id   string
+	had  bool
+	item Item
+}
+
+func (q *Queue) Apply(b Batch) (Result, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if b.Now < 0 {
+		return Result{}, ErrInvalidInput
+	}
+	if b.Now < q.now {
+		return Result{}, ErrTime
+	}
+	// Full structural validation before touching state.
+	for _, op := range b.Ops {
+		if op.Kind != Enqueue && op.Kind != Cancel {
+			return Result{}, ErrInvalidInput
+		}
+		if !q.validID(op.ID) || op.ReadyAt < 0 {
+			return Result{}, ErrInvalidInput
+		}
+	}
+
+	var undos []undoEntry
+	var revisionsIssued uint64
+	rollback := func() {
+		for i := len(undos) - 1; i >= 0; i-- {
+			u := undos[i]
+			if u.had {
+				q.items[u.id] = u.item
+			} else {
+				delete(q.items, u.id)
+			}
+		}
+		q.nextRevision -= revisionsIssued
+	}
+
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Enqueue:
+			if _, ok := q.items[op.ID]; ok {
+				rollback()
+				return Result{}, ErrExists
+			}
+			undos = append(undos, undoEntry{id: op.ID})
+			q.items[op.ID] = Item{ID: op.ID, Priority: op.Priority, ReadyAt: op.ReadyAt, Revision: q.nextRevision}
+			q.nextRevision++
+			revisionsIssued++
+		case Cancel:
+			it, ok := q.items[op.ID]
+			if !ok {
+				rollback()
+				return Result{}, ErrNotFound
+			}
+			undos = append(undos, undoEntry{id: op.ID, had: true, item: it})
+			delete(q.items, op.ID)
+		}
+	}
+
+	// Capacity is only checked at the end, against the final state.
+	if len(q.items) > q.maxItems {
+		rollback()
+		return Result{}, ErrCapacity
+	}
+
+	q.now = b.Now
+	if len(b.Ops) > 0 {
+		q.generation++
+	}
+	return Result{Generation: q.generation, Revision: q.nextRevision - 1}, nil
+}
+
+func (q *Queue) Pop(now int64, limit int) ([]Item, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if now < 0 || limit < 0 {
+		return nil, ErrInvalidInput
+	}
+	if now < q.now {
+		return nil, ErrTime
+	}
+	q.now = now
+
+	ready := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		if it.ReadyAt <= now {
+			ready = append(ready, it)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return less(ready[i], ready[j]) })
+	if limit < len(ready) {
+		ready = ready[:limit]
+	}
+	for _, it := range ready {
+		delete(q.items, it.ID)
+	}
+	if len(ready) == 0 {
+		return nil, nil
+	}
+	return ready, nil
+}
+
+func (q *Queue) Snapshot() Snapshot {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	items := make([]Item, 0, len(q.items))
+	for _, it := range q.items {
+		items = append(items, it)
+	}
+	sort.Slice(items, func(i, j int) bool { return less(items[i], items[j]) })
+	return Snapshot{
+		Generation:   q.generation,
+		NextRevision: q.nextRevision,
+		Now:          q.now,
+		Items:        items,
+	}
+}
