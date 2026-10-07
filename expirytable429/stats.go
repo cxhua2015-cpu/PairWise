@@ -7,4 +7,13 @@ type Stats struct {
 }
 
 // Stats returns a linearizable summary of the current state.
-func (t *Table) Stats() Stats { return Stats{} }
+func (t *Table) Stats() Stats {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return Stats{
+		Generation:   t.state.generation,
+		NextRevision: t.state.nextRevision,
+		Now:          t.state.now,
+		Entries:      len(t.state.entries),
+	}
+}
