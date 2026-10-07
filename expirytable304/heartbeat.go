@@ -1,6 +1,10 @@
 package expirytable304
 
-import "errors"
+import (
+	"errors"
+	"sort"
+	"sync"
+)
 
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -40,9 +44,136 @@ type Snapshot struct {
 	Now                      int64
 	Entries                  []Entry
 }
-type Table struct{}
 
-func New(Options) (*Table, error)            { return nil, ErrNotImplemented }
-func (*Table) Apply(Batch) (Result, error)   { return Result{}, ErrNotImplemented }
-func (*Table) Expire(int64) ([]Entry, error) { return nil, ErrNotImplemented }
-func (*Table) Snapshot() Snapshot            { return Snapshot{} }
+type Table struct {
+	mu           sync.Mutex
+	maxEntries   int
+	maxKeyBytes  int
+	now          int64
+	generation   uint64
+	nextRevision uint64
+	entries      map[string]Entry
+}
+
+func validKey(key string, max int) bool {
+	if len(key) == 0 || len(key) > max {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func New(o Options) (*Table, error) {
+	if o.MaxEntries <= 0 || o.MaxKeyBytes <= 0 {
+		return nil, ErrInvalidOptions
+	}
+	return &Table{
+		maxEntries:   o.MaxEntries,
+		maxKeyBytes:  o.MaxKeyBytes,
+		nextRevision: 1,
+		entries:      make(map[string]Entry),
+	}, nil
+}
+
+func (t *Table) Apply(b Batch) (Result, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Put, Touch:
+			if !validKey(op.Key, t.maxKeyBytes) || op.ExpiresAt < 0 {
+				return Result{}, ErrInvalidInput
+			}
+		case Delete:
+			if !validKey(op.Key, t.maxKeyBytes) {
+				return Result{}, ErrInvalidInput
+			}
+		default:
+			return Result{}, ErrInvalidInput
+		}
+	}
+	if b.Now < 0 || b.Now < t.now {
+		return Result{}, ErrTime
+	}
+	if len(b.Ops) == 0 {
+		return Result{Generation: t.generation}, nil
+	}
+
+	entries := make(map[string]Entry, len(t.entries))
+	for k, e := range t.entries {
+		if e.ExpiresAt > b.Now {
+			entries[k] = e
+		}
+	}
+	nextRevision := t.nextRevision
+	var lastRevision uint64
+	for _, op := range b.Ops {
+		switch op.Kind {
+		case Put:
+			entries[op.Key] = Entry{Key: op.Key, ExpiresAt: op.ExpiresAt, Revision: nextRevision}
+			lastRevision = nextRevision
+			nextRevision++
+		case Touch:
+			if _, ok := entries[op.Key]; !ok {
+				return Result{}, ErrNotFound
+			}
+			entries[op.Key] = Entry{Key: op.Key, ExpiresAt: op.ExpiresAt, Revision: nextRevision}
+			lastRevision = nextRevision
+			nextRevision++
+		case Delete:
+			if _, ok := entries[op.Key]; !ok {
+				return Result{}, ErrNotFound
+			}
+			delete(entries, op.Key)
+		}
+	}
+	if len(entries) > t.maxEntries {
+		return Result{}, ErrCapacity
+	}
+
+	t.entries = entries
+	t.now = b.Now
+	t.nextRevision = nextRevision
+	t.generation++
+	return Result{Generation: t.generation, Revision: lastRevision}, nil
+}
+
+func (t *Table) Expire(now int64) ([]Entry, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if now < 0 || now < t.now {
+		return nil, ErrTime
+	}
+	var gone []Entry
+	for k, e := range t.entries {
+		if e.ExpiresAt <= now {
+			gone = append(gone, e)
+			delete(t.entries, k)
+		}
+	}
+	t.now = now
+	sort.Slice(gone, func(i, j int) bool { return gone[i].Key < gone[j].Key })
+	return gone, nil
+}
+
+func (t *Table) Snapshot() Snapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := Snapshot{
+		Generation:   t.generation,
+		NextRevision: t.nextRevision,
+		Now:          t.now,
+		Entries:      make([]Entry, 0, len(t.entries)),
+	}
+	for _, e := range t.entries {
+		s.Entries = append(s.Entries, e)
+	}
+	sort.Slice(s.Entries, func(i, j int) bool { return s.Entries[i].Key < s.Entries[j].Key })
+	return s
+}
